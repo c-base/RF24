@@ -12,11 +12,8 @@
  * Class declaration for RF24 and helper enums
  */
 
-#ifndef __RF24_H__
-#define __RF24_H__
-
-#include <RF24_config.h>
-#include "spi.h"
+#ifndef HAVE_NRF24L01_DRIVER_H
+#define HAVE_NRF24L01_DRIVER_H
 
 #define HIGH 1
 #define LOW  0
@@ -223,7 +220,7 @@ void nrf24_toggle_features(void);
  *
  * Call this in setup(), before calling any other methods.
  */
-void nrf24_begin(void);
+void nrf24_init(void);
 
 /**
  * Start listening on the pipes opened for reading.
@@ -785,6 +782,5 @@ uint8_t nrf24_testRPD(void) ;
  * <a href="http://maniacbug.wordpress.com/2011/12/14/nrf24l01-running-on-maple-3/">nRF24L01+ Running on Maple</a>
  */
 
-#endif // __RF24_H__
+#endif//HAVE_NRF24L01_DRIVER_H
 // vim:ai:cin:sts=2 sw=2 ft=cpp
-

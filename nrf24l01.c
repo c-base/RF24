@@ -4,13 +4,13 @@
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
    version 2 as published by the Free Software Foundation.
-   */
+*/
 
-#include "nRF24L01.h"
-#include "RF24_config.h"
-#include "RF24.h"
-#include "uart.h"
-#include "util.h"
+#include "config.h"
+#include "nrf24l01_defines.h"
+#include "nrf24l01.h"
+#include "core/spi.h"
+#include "core/debug.h"
 
 #include <avr/io.h>
 #include <stddef.h>
@@ -20,14 +20,9 @@
 #include <avr/pgmspace.h>
 #include <util/delay.h>
 
-
-#undef SERIAL_DEBUG
-#ifdef SERIAL_DEBUG
-#define IF_SERIAL_DEBUG(x) ({x;})
-#else
-#define IF_SERIAL_DEBUG(x)
-#endif
-
+//Arduino legacy
+#define HIGH 1
+#define LOW 0
 
 //Global status variables
 uint8_t nrf24_wide_band = TRUE; /* 2Mbs data rate in use? */
@@ -38,6 +33,9 @@ uint8_t nrf24_dynamic_payloads_enabled = FALSE; /**< Whether dynamic payloads ar
 uint8_t nrf24_ack_payload_length; /**< Dynamic size of pending ack payload. */
 uint64_t nrf24_pipe0_reading_address = 0; /**< Last address set on pipe 0 for reading. */
 
+inline uint8_t min(uint8_t a, uint8_t b){
+    return ( a<b ? a : b );
+}
 
 inline void nrf24_csn(int mode)
 {
@@ -45,15 +43,18 @@ inline void nrf24_csn(int mode)
     // If we assume 2Mbs data rate and 16Mhz clock, a
     // divider of 4 is the minimum we want.
     // CLK:BUS 8Mhz:2Mhz, 16Mhz:4Mhz, or 20Mhz:5Mhz
-    spi_setup(SPI_MSBFIRST | SPI_MODE0 | SPI_CLOCK_DIV4);
-    CSN_PORT &= ~_BV(CSN_PIN);
-    CSN_PORT |= mode<<CSN_PIN;
+    //FIXME is the :2 divider ethersex uses too small?
+    //ethersex default config: (SPI_MSBFIRST | SPI_MODE0)
+    PIN_CLEAR(NRF24L01_CSN);
+    if(mode)
+        PIN_SET(NRF24L01_CSN);
 }
 
-inline void nrf24_ce(int level)
+inline void nrf24_ce(int mode)
 {
-    CE_PORT &= ~_BV(CE_PIN);
-    CE_PORT |= level<<CE_PIN;
+    PIN_CLEAR(NRF24L01_CE);
+    if(mode)
+        PIN_SET(NRF24L01_CE);
 }
 
 uint8_t nrf24_read_register_buf(uint8_t reg, uint8_t* buf, uint8_t len)
@@ -61,9 +62,9 @@ uint8_t nrf24_read_register_buf(uint8_t reg, uint8_t* buf, uint8_t len)
     uint8_t status;
 
     nrf24_csn(LOW);
-    status = spi_transfer( R_REGISTER | ( REGISTER_MASK & reg ) );
+    status = spi_send( R_REGISTER | ( REGISTER_MASK & reg ) );
     while ( len-- )
-        *buf++ = spi_transfer(0xff);
+        *buf++ = spi_send(0xff);
 
     nrf24_csn(HIGH);
 
@@ -73,8 +74,8 @@ uint8_t nrf24_read_register_buf(uint8_t reg, uint8_t* buf, uint8_t len)
 uint8_t nrf24_read_register(uint8_t reg)
 {
     nrf24_csn(LOW);
-    spi_transfer( R_REGISTER | ( REGISTER_MASK & reg ) );
-    uint8_t result = spi_transfer(0xff);
+    spi_send( R_REGISTER | ( REGISTER_MASK & reg ) );
+    uint8_t result = spi_send(0xff);
 
     nrf24_csn(HIGH);
     return result;
@@ -85,9 +86,9 @@ uint8_t nrf24_write_register_buf(uint8_t reg, const uint8_t* buf, uint8_t len)
     uint8_t status;
 
     nrf24_csn(LOW);
-    status = spi_transfer( W_REGISTER | ( REGISTER_MASK & reg ) );
+    status = spi_send( W_REGISTER | ( REGISTER_MASK & reg ) );
     while ( len-- )
-        spi_transfer(*buf++);
+        spi_send(*buf++);
 
     nrf24_csn(HIGH);
 
@@ -98,18 +99,13 @@ uint8_t nrf24_write_register(uint8_t reg, uint8_t value)
 {
     uint8_t status;
 
-#ifdef SERIAL_DEBUG
-    uart_puts_p(PSTR("RF24 nrf24_write_register("));
-    uart_puthex(reg);
-    uart_putc(',');
-    uart_puthex(value);
-    uart_putc(')');
-    uart_putc('\n');
+#ifdef DEBUG_NRF24L01
+    debug_printf("NRF24L01 nrf24_write_register(%h, %h)\n", reg, value);
 #endif
 
     nrf24_csn(LOW);
-    status = spi_transfer( W_REGISTER | ( REGISTER_MASK & reg ) );
-    spi_transfer(value);
+    status = spi_send( W_REGISTER | ( REGISTER_MASK & reg ) );
+    spi_send(value);
     nrf24_csn(HIGH);
 
     return status;
@@ -127,11 +123,11 @@ uint8_t nrf24_write_payload(const void* buf, uint8_t len)
     //printf("[Writing %u bytes %u blanks]",data_len,blank_len);
 
     nrf24_csn(LOW);
-    status = spi_transfer( W_TX_PAYLOAD );
+    status = spi_send( W_TX_PAYLOAD );
     while ( data_len-- )
-        spi_transfer(*current++);
+        spi_send(*current++);
     while ( blank_len-- )
-        spi_transfer(0);
+        spi_send(0);
     nrf24_csn(HIGH);
 
     return status;
@@ -148,11 +144,11 @@ uint8_t nrf24_read_payload(void* buf, uint8_t len)
     //printf("[Reading %u bytes %u blanks]",data_len,blank_len);
 
     nrf24_csn(LOW);
-    status = spi_transfer( R_RX_PAYLOAD );
+    status = spi_send( R_RX_PAYLOAD );
     while ( data_len-- )
-        *current++ = spi_transfer(0xff);
+        *current++ = spi_send(0xff);
     while ( blank_len-- )
-        spi_transfer(0xff);
+        spi_send(0xff);
     nrf24_csn(HIGH);
 
     return status;
@@ -163,7 +159,7 @@ uint8_t nrf24_flush_rx(void)
     uint8_t status;
 
     nrf24_csn(LOW);
-    status = spi_transfer( FLUSH_RX );
+    status = spi_send( FLUSH_RX );
     nrf24_csn(HIGH);
 
     return status;
@@ -174,7 +170,7 @@ uint8_t nrf24_flush_tx(void)
     uint8_t status;
 
     nrf24_csn(LOW);
-    status = spi_transfer( FLUSH_TX );
+    status = spi_send( FLUSH_TX );
     nrf24_csn(HIGH);
 
     return status;
@@ -185,7 +181,7 @@ uint8_t nrf24_get_status(void)
     uint8_t status;
 
     nrf24_csn(LOW);
-    status = spi_transfer( NOP );
+    status = spi_send( NOP );
     nrf24_csn(HIGH);
 
     return status;
@@ -193,52 +189,33 @@ uint8_t nrf24_get_status(void)
 
 void nrf24_print_status(uint8_t status)
 {
-    uart_puts_p(PSTR("RF24 STATUS\t\t = 0x"));
-    uart_puthex(status);
-    uart_puts_p(PSTR("RX_DR="));
-    uart_putc((status & _BV(RX_DR))?'1':'0');
-    uart_puts_p(PSTR("TX_DS="));
-    uart_putc((status & _BV(TX_DS))?'1':'0');
-    uart_puts_p(PSTR("MAX_RT="));
-    uart_putc((status & _BV(MAX_RT))?'1':'0');
-    uart_puts_p(PSTR("RX_P_NO=0x"));
-    uart_puthex((status >> RX_P_NO) & 0x7);
-    uart_puts_p(PSTR("TX_FULL="));
-    uart_putc((status & _BV(TX_FULL))?'1':'0');
-    uart_putc('\n');
+    debug_printf("RF24 STATUS\t\t = 0x%h RX_DR=%d TX_DS=%d MAX_RT=%d RX_P_NO=0x%h, TX_FULL=\n",
+            status,
+            ((status & _BV(RX_DR))?'1':'0'),
+            ((status & _BV(TX_DS))?'1':'0'),
+            ((status & _BV(MAX_RT))?'1':'0'),
+            ((status >> RX_P_NO) & 0x7),
+            ((status & _BV(TX_FULL))?'1':'0'));
 }
 
 void nrf24_print_observe_tx(uint8_t value)
 {
-    uart_puts_p(PSTR("RF24 OBSERVE_TX="));
-    uart_puthex(value);
-    uart_puts_p(PSTR(": POLS_CNT="));
-    uart_puthex((value >> PLOS_CNT) & 0xF);
-    uart_puts_p(PSTR("ARC_CNT="));
-    uart_puthex((value >> ARC_CNT) & 0xF);
-    uart_putc('\n');
+    debug_printf("RF24 OBSERVE_TX=0x%h: POLS_CNT=0x%h ARC_CNT=0x%h\n",
+            value,
+            ((value >> PLOS_CNT) & 0xF),
+            ((value >> ARC_CNT) & 0xF));
 }
 
 void nrf24_print_byte_register(const char* name, uint8_t reg, uint8_t qty)
 {
-    if(!qty){
+    if(!qty)
         qty = 1;
-    }
-    uart_puts_p(PSTR("RF24 "));
-    uart_puts(name);
-    uart_putc('\t');
-    if(strlen_P(name) < 8){
-        uart_putc('\t');
-    }
-    uart_putc(' ');
-    uart_putc('=');
-    while (qty--){
-        uart_putc(' ');
-        uart_putc('0');
-        uart_putc('x');
-        uart_puthex(nrf24_read_register(reg++));
-    }
-    uart_putc('\n');
+    debug_printf("RF24 %s\t%c =",
+            name,
+            (strlen_P(name) < 8) ? '\t' : '');
+    while (qty--)
+        debug_printf("0x%h", nrf24_read_register(reg++));
+    debug_printf("\n");
 }
 
 void nrf24_print_address_register(const char* name, uint8_t reg, uint8_t qty)
@@ -246,27 +223,20 @@ void nrf24_print_address_register(const char* name, uint8_t reg, uint8_t qty)
     if(!qty){
         qty = 1;
     }
-    uart_puts_p(PSTR("RF24 "));
-    uart_puts(name);
-    uart_putc('\t');
-    if(strlen_P(name) < 8){
-        uart_putc('\t');
-    }
-    uart_putc(' ');
-    uart_putc('=');
+    debug_printf("NRF24L01 %s\t%c =",
+            name,
+            (strlen_P(name) < 8) ? '\t' : '');
     while (qty--)
     {
         uint8_t buffer[5];
         nrf24_read_register_buf(reg++,buffer,sizeof(buffer));
-        uart_putc(' ');
-        uart_putc('0');
-        uart_putc('x');
+        debug_printf(" 0x");
         uint8_t* bufptr = buffer + sizeof(buffer);
         while( --bufptr >= buffer ){
-            uart_puthex(*bufptr);
+            debug_printf("%h", *bufptr);
         }
     }
-    uart_putc('\n');
+    debug_printf("\n");
 }
 
 
@@ -283,7 +253,7 @@ void nrf24_setChannel(uint8_t channel)
 
 void nrf24_setPayloadSize(uint8_t size)
 {
-    nrf24_payload_size = min(size,MAX_PAYLOAD_SIZE);
+    nrf24_payload_size = min(size,NRF24L01_MAX_PAYLOAD_SIZE);
 }
 
 
@@ -344,30 +314,28 @@ void nrf24_printDetails(void)
     nrf24_print_byte_register(PSTR("CONFIG"),CONFIG,1);
     nrf24_print_byte_register(PSTR("DYNPD/FEATURE"),DYNPD,2);
 
-    uart_puts_p(PSTR("RF24 Data Rate\t = "));
-    uart_puts_p((const char*)pgm_read_word(&rf24_datarate_e_str_P[nrf24_getDataRate()]));
-    uart_putc('\n');
-    uart_puts_p(PSTR("RF24 Model\t\t = "));
-    uart_puts_p((const char*)pgm_read_word(&rf24_model_e_str_P[nrf24_isPVariant()]));
-    uart_putc('\n');
-    uart_puts_p(PSTR("RF24 CRC Length\t = "));
-    uart_puts_p((const char*)pgm_read_word(&rf24_crclength_e_str_P[nrf24_getCRCLength()]));
-    uart_putc('\n');
-    uart_puts_p(PSTR("RF24 PA Power\t = "));
-    uart_puts_p((const char*)pgm_read_word(&rf24_pa_dbm_e_str_P[nrf24_getPALevel()]));
-    uart_putc('\n');
+    debug_printf("RF24 Data Rate\t = %s\n",
+            (const char*)pgm_read_word(&rf24_datarate_e_str_P[nrf24_getDataRate()]));
+
+    debug_printf("RF24 Model\t\t = %s\n",
+            (const char*)pgm_read_word(&rf24_model_e_str_P[nrf24_isPVariant()]));
+
+    debug_printf("RF24 CRC Length\t = %s\n",
+            (const char*)pgm_read_word(&rf24_crclength_e_str_P[nrf24_getCRCLength()]));
+
+    debug_printf("RF24 PA Power\t = %s\n",
+            (const char*)pgm_read_word(&rf24_pa_dbm_e_str_P[nrf24_getPALevel()]));
 }
 
 
 
-void nrf24_begin(void)
+void nrf24_init(void)
 {
     // Initialize pins
-    CE_DDR |= _BV(CE_PIN);
-    CSN_DDR |= _BV(CSN_PIN);
+    DDR_CONFIG_OUT(NRF24L01_CE);
+    DDR_CONFIG_OUT(NRF24L01_CSN);
 
-    // Initialize SPI bus
-    spi_begin();
+    // SPI has already been initialized for us.
 
     nrf24_ce(LOW);
     nrf24_csn(HIGH);
@@ -494,7 +462,9 @@ uint8_t nrf24_write( const void* buf, uint8_t len )
     do
     {
         status = nrf24_read_register_buf(OBSERVE_TX,&observe_tx,1);
-        IF_SERIAL_DEBUG(uart_puthex(observe_tx));
+#ifdef DEBUG_NRF24L01
+        debug_printf("NRF24L01 signal strength %h\n", observe_tx));
+#endif
         cycles++;
     }
     while( ! ( status & ( _BV(TX_DS) | _BV(MAX_RT) ) ) && ( cycles < timeout ) );
@@ -514,17 +484,17 @@ uint8_t nrf24_write( const void* buf, uint8_t len )
     //printf("%u%u%u\r\n",tx_ok,tx_fail,ack_payload_available);
 
     result = tx_ok;
-    IF_SERIAL_DEBUG(uart_puts(result?"...OK.":"...Failed"));
+#ifdef DEBUG_NRF24L01
+    debug_printf("NRF24L01 %s\n", (result?"OK":"Failed"));
+#endif
 
     // Handle the ack packet
     if ( nrf24_ack_payload_available )
     {
         nrf24_ack_payload_length = nrf24_getDynamicPayloadSize();
-#ifdef SERIAL_DEBUG
-        uart_puts_p(PSTR("RF24 [AckPacket]/"));
-        uart_putdec(uart_ack_payload_length);
-        uart_putc('\n');
-#endif//SERIAL_DEBUG
+#ifdef DEBUG_NRF24L01
+        debug_printf("NRF24L01 ack packet %d\n", uart_ack_payload_length);
+#endif//DEBUG_NRF24L01
     }
 
     // Yay, we are done.
@@ -561,8 +531,8 @@ uint8_t nrf24_getDynamicPayloadSize(void)
     uint8_t result = 0;
 
     nrf24_csn(LOW);
-    spi_transfer( R_RX_PL_WID );
-    result = spi_transfer(0xff);
+    spi_send( R_RX_PL_WID );
+    result = spi_send(0xff);
     nrf24_csn(HIGH);
 
     return result;
@@ -582,7 +552,9 @@ uint8_t nrf24_available_pipe(uint8_t* pipe_num)
     uint8_t status = nrf24_get_status();
 
     // Too noisy, enable if you really want lots o data!!
-    //IF_SERIAL_DEBUG(print_status(status));
+#ifdef DEBUG_NRF24L01
+    //print_status(status);
+#endif
 
     uint8_t result = ( status & _BV(RX_DR) );
 
@@ -644,7 +616,7 @@ void nrf24_openWritingPipe(uint64_t value)
     nrf24_write_register_buf(RX_ADDR_P0, (uint8_t*)(&value), 5);
     nrf24_write_register_buf(TX_ADDR, (uint8_t*)(&value), 5);
 
-    nrf24_write_register(RX_PW_P0,min(nrf24_payload_size,MAX_PAYLOAD_SIZE));
+    nrf24_write_register(RX_PW_P0, min(nrf24_payload_size, NRF24L01_MAX_PAYLOAD_SIZE));
 }
 
 
@@ -692,8 +664,8 @@ void nrf24_openReadingPipe(uint8_t child, uint64_t address)
 void nrf24_toggle_features(void)
 {
     nrf24_csn(LOW);
-    spi_transfer( ACTIVATE );
-    spi_transfer( 0x73 );
+    spi_send( ACTIVATE );
+    spi_send( 0x73 );
     nrf24_csn(HIGH);
 }
 
@@ -712,11 +684,9 @@ void nrf24_enableDynamicPayloads(void)
         nrf24_write_register(FEATURE,nrf24_read_register(FEATURE) | _BV(EN_DPL) );
     }
 
-#ifdef SERIAL_DEBUG
-    uart_puts_p(PSTR("RF24 FEATURE="));
-    uart_putdec(read_register(FEATURE));
-    uart_putc('\n');
-#endif//SERIAL_DEBUG
+#ifdef DEBUG_NRF24L01
+    debug_printf("NRF24L01 feature=%d\n", read_register(FEATURE));
+#endif//DEBUG_NRF24L01
 
     // Enable dynamic payload on all pipes
     //
@@ -745,10 +715,8 @@ void nrf24_enableAckPayload(void)
         nrf24_write_register(FEATURE,nrf24_read_register(FEATURE) | _BV(EN_ACK_PAY) | _BV(EN_DPL) );
     }
 
-#ifdef SERIAL_DEBUG
-    uart_puts_p(PSTR("RF24 FEATURE="));
-    uart_putdec(read_register(FEATURE));
-    uart_putc('\n');
+#ifdef DEBUG_NRF24L01
+    debug_printf("NRF24L01 feature=%d\n", read_register(FEATURE));
 #endif
 
     //
@@ -765,10 +733,10 @@ void nrf24_writeAckPayload(uint8_t pipe, const void* buf, uint8_t len)
     const uint8_t* current = (const uint8_t*)(buf);
 
     nrf24_csn(LOW);
-    spi_transfer( W_ACK_PAYLOAD | ( pipe & 7 ) );
-    uint8_t data_len = min(len,MAX_PAYLOAD_SIZE);
+    spi_send( W_ACK_PAYLOAD | ( pipe & 7 ) );
+    uint8_t data_len = min(len,NRF24L01_MAX_PAYLOAD_SIZE);
     while ( data_len-- )
-        spi_transfer(*current++);
+        spi_send(*current++);
 
     nrf24_csn(HIGH);
 }
@@ -1017,3 +985,10 @@ void nrf24_setRetries(uint8_t delay, uint8_t count)
 {
     nrf24_write_register(SETUP_RETR,(delay&0xf)<<ARD | (count&0xf)<<ARC);
 }
+
+/*
+  -- Ethersex META --
+  header(hardware/nrf24l01/driver/nrf24l01.h)
+  init(nrf24_init)
+  block([[NRF24L01_GENERAL]])
+*/
